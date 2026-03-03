@@ -64,8 +64,7 @@ python generate.py
 
 ## Roadmap
 
-- [x] Implementacao conceitual com NumPy
-- [x] Migracao para PyTorch com suporte a GPU
+- [x] Setup inicial PyTorch com suporte a GPU
 - [ ] Evoluir tokenizer para BPE
 - [ ] Coleta e preparacao de dataset educacional
 - [ ] Treinamento de modelos de 10M+ parametros
