@@ -26,3 +26,5 @@ corpus.txt
 data/raw/
 data/scraping/.progress.json
 data/scraping/wikipedia_math_physics/
+**/**.jsonl
+**/**.json
