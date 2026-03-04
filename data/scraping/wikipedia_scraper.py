@@ -4,14 +4,23 @@ Scraper de artigos do Wikipedia para corpus de treino do Gepeto-2.
 Foca em artigos de Matemática e Física. Usa a Wikipedia API para
 extrair texto limpo (sem HTML), preservando estrutura de parágrafos.
 
+Saída em JSONL (um documento JSON por linha):
+  {"text": "...", "title": "...", "source": "wikipedia", "category": "..."}
+
+Isso permite:
+  - Shuffle no nível de documentos (embaralhar linhas)
+  - Controle de proporção entre fontes (Wikipedia, arXiv, etc.)
+  - Metadados preservados para filtragem e análise
+  - Combinação trivial de múltiplas fontes
+
 Saída:
-  data/corpus_wikipedia.txt    — corpus pronto para treino
+  data/raw/wikipedia.jsonl     — artigos coletados
   data/scraping/.progress.json — progresso para retomar depois
 
 Uso:
   python data/scraping/wikipedia_scraper.py
   python data/scraping/wikipedia_scraper.py --max-per-category 500
-  python data/scraping/wikipedia_scraper.py --output data/corpus.txt
+  python data/scraping/wikipedia_scraper.py --output data/raw/wikipedia.jsonl
 """
 
 import argparse
@@ -45,7 +54,7 @@ CATEGORIES = [
 ]
 
 API_URL = "https://en.wikipedia.org/w/api.php"
-OUTPUT_FILE = Path("data/corpus_wikipedia.txt")
+OUTPUT_FILE = Path("data/raw/wikipedia.jsonl")
 PROGRESS_FILE = Path("data/scraping/.progress.json")
 
 MIN_CHARS = 300      # artigos menores que isso são descartados
@@ -177,15 +186,6 @@ def _save_progress(scraped: set[str]) -> None:
 
 
 # --------------------------------------------------------------------------- #
-# Formatação do corpus
-# --------------------------------------------------------------------------- #
-
-def format_article(title: str, text: str) -> str:
-    """Formata um artigo para o corpus: cabeçalho + corpo + linha em branco final."""
-    return f"# {title}\n\n{text}\n"
-
-
-# --------------------------------------------------------------------------- #
 # Main
 # --------------------------------------------------------------------------- #
 
@@ -199,7 +199,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--output", type=Path, default=OUTPUT_FILE,
-        help=f"Arquivo de saída (padrão: {OUTPUT_FILE})",
+        help=f"Arquivo de saída JSONL (padrão: {OUTPUT_FILE})",
     )
     args = parser.parse_args()
 
@@ -253,7 +253,13 @@ def main() -> None:
                     _save_progress(scraped)
                     continue
 
-                out.write(format_article(title, text) + "\n")
+                record = {
+                    "text": text,
+                    "title": title,
+                    "source": "wikipedia",
+                    "category": category,
+                }
+                out.write(json.dumps(record, ensure_ascii=False) + "\n")
                 out.flush()
 
                 scraped.add(title)
