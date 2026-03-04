@@ -21,3 +21,10 @@ text_video.py
 CLAUDE.md
 IDEIA.md
 corpus.txt
+
+# Dados — gerados em runtime, não versionados
+data/raw/
+data/scraping/.progress.json
+data/scraping/wikipedia_math_physics/
+**/**.jsonl
+**/**.json
