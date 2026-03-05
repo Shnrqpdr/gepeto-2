@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
-from gepeto import GPT, TextDataset, CharTokenizer
+from gepeto import GPT, TextDataset, BPETokenizer, load_jsonl_corpus
 from datetime import datetime
 import os
 
@@ -33,30 +33,29 @@ def evaluate(model, dataloader, device):
     return avg_loss, accuracy
 
 
-def load_text(path):
-    with open(path, 'r', encoding='utf-8') as f:
-        return f.read()
-
-
 def main():
     device = get_device()
     print(f"Using device: {device}")
 
-    raw_text = load_text("data/corpus.txt")
-    tokenizer = CharTokenizer.load("data/tokenizer.json")
-    encoded = tokenizer.encode(raw_text)
+    # Tokenizer e corpus
+    tokenizer = BPETokenizer.load("data/bpe_tokenizer.json")
+    print(f"Tokenizer: {tokenizer}")
+
+    print("Encoding corpus...")
+    encoded = load_jsonl_corpus("data/scraping/data/raw/wikipedia.jsonl", tokenizer)
+    print(f"Total tokens: {len(encoded):,}")
 
     # Train/val split
-    split_idx = int(len(encoded) * 0.8)
+    split_idx = int(len(encoded) * 0.9)
     train_tokens = encoded[:split_idx]
     val_tokens = encoded[split_idx:]
 
     # Hyperparameters
-    context_len = 64
-    embed_dim = 64
-    num_heads = 4
-    num_layers = 4
-    batch_size = 64
+    context_len = 256
+    embed_dim = 256
+    num_heads = 8
+    num_layers = 8
+    batch_size = 32
     learning_rate = 3e-4
     epochs = 10
     vocab_size = tokenizer.vocab_size
@@ -113,6 +112,8 @@ def main():
             'context_len': context_len,
             'num_heads': num_heads,
             'num_layers': num_layers,
+            'tokenizer_type': 'bpe',
+            'tokenizer_path': 'data/bpe_tokenizer.json',
         }
     }, os.path.join(save_dir, "checkpoint.pt"))
     print(f"\nModel saved to {save_dir}")
