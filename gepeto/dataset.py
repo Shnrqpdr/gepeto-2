@@ -18,8 +18,17 @@ class TextDataset(Dataset):
         return torch.tensor(x, dtype=torch.long), torch.tensor(y, dtype=torch.long)
 
 
-def load_jsonl_corpus(filepath: str, tokenizer, text_field: str = "text") -> list[int]:
-    """Carrega JSONL, encoda cada documento e separa com <|endoftext|>."""
+def load_jsonl_corpus(
+    filepath: str,
+    tokenizer,
+    text_field: str = "text",
+    max_tokens: int | None = None,
+) -> list[int]:
+    """Carrega JSONL, encoda cada documento e separa com <|endoftext|>.
+
+    Se max_tokens for definido, para de ler assim que atingir o limite,
+    sem precisar processar o corpus inteiro.
+    """
     eot = tokenizer.encode("<|endoftext|>")
     all_tokens: list[int] = []
 
@@ -30,4 +39,7 @@ def load_jsonl_corpus(filepath: str, tokenizer, text_field: str = "text") -> lis
             all_tokens.extend(tokens)
             all_tokens.extend(eot)
 
-    return all_tokens
+            if max_tokens and len(all_tokens) >= max_tokens:
+                break
+
+    return all_tokens[:max_tokens] if max_tokens else all_tokens

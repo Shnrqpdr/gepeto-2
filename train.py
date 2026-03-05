@@ -1,9 +1,22 @@
+import argparse
+import os
+from datetime import datetime
+
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
-from gepeto import GPT, TextDataset, BPETokenizer, load_jsonl_corpus
-from datetime import datetime
-import os
+
+from gepeto import GPT, BPETokenizer, TextDataset, load_jsonl_corpus
+
+# Presets de tamanho de modelo
+PRESETS = {
+    # Para smoke tests rapidos (segundos)
+    "debug": dict(context_len=64,  embed_dim=64,  num_heads=4, num_layers=4, batch_size=64),
+    # Para experimentos medios (minutos)
+    "small": dict(context_len=128, embed_dim=128, num_heads=4, num_layers=6, batch_size=64),
+    # Para treinamento serio (horas)
+    "base":  dict(context_len=256, embed_dim=256, num_heads=8, num_layers=8, batch_size=32),
+}
 
 
 def get_device():
@@ -34,6 +47,25 @@ def evaluate(model, dataloader, device):
 
 
 def main():
+    parser = argparse.ArgumentParser(description="Treina o Gepeto-2")
+    parser.add_argument(
+        "--preset", choices=PRESETS.keys(), default="base",
+        help="Preset de tamanho do modelo (default: base)",
+    )
+    parser.add_argument(
+        "--max-tokens", type=int, default=None,
+        help="Limita o corpus a N tokens (util para testes rapidos)",
+    )
+    parser.add_argument(
+        "--epochs", type=int, default=10,
+        help="Numero de epochs (default: 10)",
+    )
+    parser.add_argument(
+        "--lr", type=float, default=3e-4,
+        help="Learning rate (default: 3e-4)",
+    )
+    args = parser.parse_args()
+
     device = get_device()
     print(f"Using device: {device}")
 
@@ -42,7 +74,9 @@ def main():
     print(f"Tokenizer: {tokenizer}")
 
     print("Encoding corpus...")
-    encoded = load_jsonl_corpus("data/scraping/data/raw/wikipedia.jsonl", tokenizer)
+    encoded = load_jsonl_corpus(
+        "data/scraping/data/raw/wikipedia.jsonl", tokenizer, max_tokens=args.max_tokens
+    )
     print(f"Total tokens: {len(encoded):,}")
 
     # Train/val split
@@ -50,32 +84,33 @@ def main():
     train_tokens = encoded[:split_idx]
     val_tokens = encoded[split_idx:]
 
-    # Hyperparameters
-    context_len = 256
-    embed_dim = 256
-    num_heads = 8
-    num_layers = 8
-    batch_size = 32
-    learning_rate = 3e-4
-    epochs = 10
-    vocab_size = tokenizer.vocab_size
+    # Hiperparametros do preset escolhido
+    hp = PRESETS[args.preset]
+    context_len = hp["context_len"]
+    embed_dim   = hp["embed_dim"]
+    num_heads   = hp["num_heads"]
+    num_layers  = hp["num_layers"]
+    batch_size  = hp["batch_size"]
+    vocab_size  = tokenizer.vocab_size
+
+    print(f"Preset: {args.preset} | ctx={context_len} dim={embed_dim} heads={num_heads} layers={num_layers}")
 
     train_dataset = TextDataset(train_tokens, context_len)
-    val_dataset = TextDataset(val_tokens, context_len)
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-    val_loader = DataLoader(val_dataset, batch_size=batch_size)
+    val_dataset   = TextDataset(val_tokens, context_len)
+    train_loader  = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+    val_loader    = DataLoader(val_dataset, batch_size=batch_size)
 
     model = GPT(vocab_size, embed_dim, context_len, num_heads, num_layers).to(device)
     print(f"Model parameters: {model.count_parameters():,}")
 
-    optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
     scaler = torch.amp.GradScaler('cuda', enabled=(device.type == 'cuda'))
 
     print(f"\nStart time: {datetime.now().strftime('%H:%M:%S')}")
     print(f"{'Epoch':>5} | {'Train Loss':>10} | {'Val Loss':>10} | {'Val Acc':>8} | {'Time'}")
     print("-" * 60)
 
-    for epoch in range(epochs):
+    for epoch in range(args.epochs):
         model.train()
         total_loss = 0
 
