@@ -46,7 +46,7 @@ O modelo segue a arquitetura GPT-2 com algumas escolhas modernas:
 - **Learned Positional Embeddings** — `nn.Embedding` ao inves de sinusoidal
 - **AdamW** com gradient clipping e mixed precision (FP16)
 
-Configuravel entre **10M e 120M parametros**, treinado localmente em uma **RTX 4060 (8GB VRAM)**.
+Configuravel entre **10M e 120M parametros**. Os primeiros modelos foram treinados com sucesso em uma **RTX 4060 (8GB VRAM)**, validando que a arquitetura e o pipeline de treino funcionam dentro das restricoes de hardware consumer. Novos experimentos estao sendo conduzidos em uma **RTX 5070 (12GB VRAM)**, permitindo escalar para modelos maiores (~200M+ parametros), contextos mais longos e batch sizes superiores.
 
 ## Estrutura do Projeto
 
@@ -121,6 +121,15 @@ python generate.py
 python generate.py --prompt "The fundamental theorem of"
 ```
 
+## Hardware
+
+| GPU | VRAM | Fase do projeto | Escala de modelo |
+|-----|------|----------------|------------------|
+| RTX 4060 | 8 GB GDDR6 | Desenvolvimento e validacao inicial | 10M–120M params, ctx 256 |
+| RTX 5070 | 12 GB GDDR7 | Escalonamento e novos experimentos | 200M+ params, ctx 512–1024 |
+
+A troca de GPU traz ~50% mais VRAM, ~2x CUDA cores e bandwidth significativamente maior (GDDR7), permitindo explorar modelos que nao cabiam nos 8GB da 4060 — alem de acelerar o treinamento dos modelos existentes.
+
 ## Roadmap
 
 - [x] Setup inicial PyTorch com suporte a GPU
@@ -129,6 +138,7 @@ python generate.py --prompt "The fundamental theorem of"
 - [x] Geracao de texto interativa (modo REPL com temperature/top-k ajustaveis)
 - [ ] Treinamento de modelos de 10M+ parametros
 - [ ] Escalonamento progressivo (gradient checkpointing)
+- [ ] Novos presets para RTX 5070 (modelos maiores, contextos mais longos)
 - [ ] Estrategias de sampling avancadas (top-p / nucleus sampling)
 - [ ] Supervised Fine-Tuning para modo instrucao
 
