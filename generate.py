@@ -9,7 +9,7 @@ from gepeto import GPT, BPETokenizer
 def load_model(checkpoint_path, device):
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=True)
     config = checkpoint['config']
-    model_keys = {'vocab_size', 'embed_dim', 'context_len', 'num_heads', 'num_layers'}
+    model_keys = {'vocab_size', 'embed_dim', 'context_len', 'num_heads', 'num_layers', 'dropout'}
     model_config = {k: v for k, v in config.items() if k in model_keys}
     model = GPT(**model_config).to(device)
     model.load_state_dict(checkpoint['model_state_dict'])

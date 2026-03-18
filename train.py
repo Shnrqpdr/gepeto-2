@@ -1,4 +1,6 @@
 import argparse
+import csv
+import math
 import os
 from datetime import datetime
 
@@ -103,12 +105,49 @@ def main():
     model = GPT(vocab_size, embed_dim, context_len, num_heads, num_layers).to(device)
     print(f"Model parameters: {model.count_parameters():,}")
 
-    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
+    # Weight decay seletivo: decay em pesos de Linear, sem decay em biases e LayerNorm
+    decay_params = []
+    no_decay_params = []
+    for name, param in model.named_parameters():
+        if not param.requires_grad:
+            continue
+        if param.ndim < 2 or 'ln' in name or 'bias' in name:
+            no_decay_params.append(param)
+        else:
+            decay_params.append(param)
+
+    optimizer = torch.optim.AdamW([
+        {"params": decay_params, "weight_decay": 0.1},
+        {"params": no_decay_params, "weight_decay": 0.0},
+    ], lr=args.lr)
     scaler = torch.amp.GradScaler('cuda', enabled=(device.type == 'cuda'))
 
+    # Cosine LR scheduler com linear warmup
+    total_steps = len(train_loader) * args.epochs
+    warmup_steps = min(total_steps // 10, 2000)
+    min_lr = args.lr * 0.1
+
+    def lr_lambda(step):
+        if step < warmup_steps:
+            return step / max(1, warmup_steps)
+        progress = (step - warmup_steps) / max(1, total_steps - warmup_steps)
+        return max(min_lr / args.lr, 0.5 * (1 + math.cos(math.pi * progress)))
+
+    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+
+    # Diretorio do run (criado antes para salvar logs durante o treino)
+    save_dir = os.path.join("checkpoints", datetime.now().strftime("%Y-%m-%d_%H-%M-%S"))
+    os.makedirs(save_dir, exist_ok=True)
+
+    log_path = os.path.join(save_dir, "metrics.csv")
+    log_file = open(log_path, "w", newline="")
+    log_writer = csv.writer(log_file)
+    log_writer.writerow(["epoch", "train_loss", "val_loss", "val_acc", "lr"])
+
     print(f"\nStart time: {datetime.now().strftime('%H:%M:%S')}")
-    print(f"{'Epoch':>5} | {'Train Loss':>10} | {'Val Loss':>10} | {'Val Acc':>8} | {'Time'}")
-    print("-" * 60)
+    print(f"Total steps: {total_steps:,} | Warmup: {warmup_steps:,}")
+    print(f"{'Epoch':>5} | {'Train Loss':>10} | {'Val Loss':>10} | {'Val Acc':>8} | {'LR':>10} | {'Time'}")
+    print("-" * 70)
 
     for epoch in range(args.epochs):
         model.train()
@@ -127,18 +166,23 @@ def main():
             nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             scaler.step(optimizer)
             scaler.update()
+            scheduler.step()
 
             total_loss += loss.item()
 
         avg_train_loss = total_loss / len(train_loader)
         val_loss, val_acc = evaluate(model, val_loader, device)
+        current_lr = optimizer.param_groups[0]['lr']
+
+        log_writer.writerow([epoch + 1, f"{avg_train_loss:.6f}", f"{val_loss:.6f}", f"{val_acc:.6f}", f"{current_lr:.2e}"])
+        log_file.flush()
 
         now = datetime.now().strftime("%H:%M:%S")
-        print(f"{epoch+1:5d} | {avg_train_loss:10.4f} | {val_loss:10.4f} | {val_acc:8.4f} | {now}")
+        print(f"{epoch+1:5d} | {avg_train_loss:10.4f} | {val_loss:10.4f} | {val_acc:8.4f} | {current_lr:10.2e} | {now}")
+
+    log_file.close()
 
     # Save checkpoint
-    save_dir = os.path.join("checkpoints", datetime.now().strftime("%Y-%m-%d_%H-%M-%S"))
-    os.makedirs(save_dir, exist_ok=True)
     torch.save({
         'model_state_dict': model.state_dict(),
         'config': {
@@ -147,6 +191,7 @@ def main():
             'context_len': context_len,
             'num_heads': num_heads,
             'num_layers': num_layers,
+            'dropout': 0.1,
             'tokenizer_type': 'bpe',
             'tokenizer_path': 'data/bpe_tokenizer.json',
         }
