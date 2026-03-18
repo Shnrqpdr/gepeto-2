@@ -13,11 +13,15 @@ from gepeto import GPT, BPETokenizer, TextDataset, load_jsonl_corpus
 # Presets de tamanho de modelo
 PRESETS = {
     # Para smoke tests rapidos (segundos)
-    "debug": dict(context_len=64,  embed_dim=64,  num_heads=4, num_layers=4, batch_size=64),
+    "debug":  dict(context_len=64,  embed_dim=64,  num_heads=4,  num_layers=4,  batch_size=64),
     # Para experimentos medios (minutos)
-    "small": dict(context_len=128, embed_dim=128, num_heads=4, num_layers=6, batch_size=64),
+    "small":  dict(context_len=128, embed_dim=128, num_heads=4,  num_layers=6,  batch_size=64),
     # Para treinamento serio (horas)
-    "base":  dict(context_len=256, embed_dim=256, num_heads=8, num_layers=8, batch_size=32),
+    "base":   dict(context_len=256, embed_dim=256, num_heads=8,  num_layers=8,  batch_size=32),
+    # ~25M params — RTX 5070 12GB com grad accum
+    "medium": dict(context_len=512, embed_dim=512, num_heads=8,  num_layers=12, batch_size=16),
+    # ~85M params — RTX 5070 12GB com grad accum e batch menor
+    "large":  dict(context_len=512, embed_dim=768, num_heads=12, num_layers=12, batch_size=8),
 }
 
 
@@ -65,6 +69,14 @@ def main():
     parser.add_argument(
         "--lr", type=float, default=3e-4,
         help="Learning rate (default: 3e-4)",
+    )
+    parser.add_argument(
+        "--grad-accum", type=int, default=1,
+        help="Gradient accumulation steps (default: 1, effective batch = batch_size * grad_accum)",
+    )
+    parser.add_argument(
+        "--resume", type=str, default=None,
+        help="Caminho para checkpoint para retomar treino",
     )
     args = parser.parse_args()
 
@@ -139,52 +151,83 @@ def main():
     save_dir = os.path.join("checkpoints", datetime.now().strftime("%Y-%m-%d_%H-%M-%S"))
     os.makedirs(save_dir, exist_ok=True)
 
+    # Checkpoint resumption
+    start_epoch = 0
+    if args.resume:
+        print(f"Resuming from {args.resume}")
+        resume_ckpt = torch.load(args.resume, map_location=device, weights_only=True)
+        model.load_state_dict(resume_ckpt['model_state_dict'])
+        if 'optimizer_state_dict' in resume_ckpt:
+            optimizer.load_state_dict(resume_ckpt['optimizer_state_dict'])
+        if 'scheduler_state_dict' in resume_ckpt:
+            scheduler.load_state_dict(resume_ckpt['scheduler_state_dict'])
+        if 'scaler_state_dict' in resume_ckpt:
+            scaler.load_state_dict(resume_ckpt['scaler_state_dict'])
+        if 'epoch' in resume_ckpt:
+            start_epoch = resume_ckpt['epoch']
+            print(f"Resuming from epoch {start_epoch + 1}")
+
+    grad_accum_steps = args.grad_accum
+    effective_batch = batch_size * grad_accum_steps
+
     log_path = os.path.join(save_dir, "metrics.csv")
     log_file = open(log_path, "w", newline="")
     log_writer = csv.writer(log_file)
-    log_writer.writerow(["epoch", "train_loss", "val_loss", "val_acc", "lr"])
+    log_writer.writerow(["epoch", "train_loss", "val_loss", "val_acc", "lr", "grad_norm"])
 
     print(f"\nStart time: {datetime.now().strftime('%H:%M:%S')}")
-    print(f"Total steps: {total_steps:,} | Warmup: {warmup_steps:,}")
-    print(f"{'Epoch':>5} | {'Train Loss':>10} | {'Val Loss':>10} | {'Val Acc':>8} | {'LR':>10} | {'Time'}")
-    print("-" * 70)
+    print(f"Total steps: {total_steps:,} | Warmup: {warmup_steps:,} | Grad accum: {grad_accum_steps} | Effective batch: {effective_batch}")
+    print(f"{'Epoch':>5} | {'Train Loss':>10} | {'Val Loss':>10} | {'Val Acc':>8} | {'LR':>10} | {'Grad Norm':>10} | {'Time'}")
+    print("-" * 85)
 
-    for epoch in range(args.epochs):
+    for epoch in range(start_epoch, args.epochs):
         model.train()
         total_loss = 0
+        epoch_grad_norm = 0
+        optimizer_steps = 0
 
-        for x, y in train_loader:
+        optimizer.zero_grad()
+        for step, (x, y) in enumerate(train_loader):
             x, y = x.to(device), y.to(device)
 
             with torch.amp.autocast('cuda', enabled=(device.type == 'cuda')):
                 logits = model(x)
                 loss = nn.functional.cross_entropy(logits.view(-1, logits.size(-1)), y.view(-1))
+                loss = loss / grad_accum_steps
 
-            optimizer.zero_grad()
             scaler.scale(loss).backward()
-            scaler.unscale_(optimizer)
-            nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-            scaler.step(optimizer)
-            scaler.update()
-            scheduler.step()
+            total_loss += loss.item() * grad_accum_steps
 
-            total_loss += loss.item()
+            if (step + 1) % grad_accum_steps == 0 or (step + 1) == len(train_loader):
+                scaler.unscale_(optimizer)
+                grad_norm = nn.utils.clip_grad_norm_(model.parameters(), 1.0).item()
+                epoch_grad_norm += grad_norm
+                optimizer_steps += 1
+                scaler.step(optimizer)
+                scaler.update()
+                scheduler.step()
+                optimizer.zero_grad()
 
         avg_train_loss = total_loss / len(train_loader)
+        avg_grad_norm = epoch_grad_norm / max(1, optimizer_steps)
         val_loss, val_acc = evaluate(model, val_loader, device)
         current_lr = optimizer.param_groups[0]['lr']
 
-        log_writer.writerow([epoch + 1, f"{avg_train_loss:.6f}", f"{val_loss:.6f}", f"{val_acc:.6f}", f"{current_lr:.2e}"])
+        log_writer.writerow([epoch + 1, f"{avg_train_loss:.6f}", f"{val_loss:.6f}", f"{val_acc:.6f}", f"{current_lr:.2e}", f"{avg_grad_norm:.4f}"])
         log_file.flush()
 
         now = datetime.now().strftime("%H:%M:%S")
-        print(f"{epoch+1:5d} | {avg_train_loss:10.4f} | {val_loss:10.4f} | {val_acc:8.4f} | {current_lr:10.2e} | {now}")
+        print(f"{epoch+1:5d} | {avg_train_loss:10.4f} | {val_loss:10.4f} | {val_acc:8.4f} | {current_lr:10.2e} | {avg_grad_norm:10.4f} | {now}")
 
     log_file.close()
 
-    # Save checkpoint
+    # Save checkpoint (com estado completo para resumption)
     torch.save({
         'model_state_dict': model.state_dict(),
+        'optimizer_state_dict': optimizer.state_dict(),
+        'scheduler_state_dict': scheduler.state_dict(),
+        'scaler_state_dict': scaler.state_dict(),
+        'epoch': args.epochs,
         'config': {
             'vocab_size': vocab_size,
             'embed_dim': embed_dim,
