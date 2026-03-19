@@ -1,4 +1,5 @@
 import json
+import os
 
 import torch
 from torch.utils.data import Dataset
@@ -43,3 +44,35 @@ def load_jsonl_corpus(
                 break
 
     return all_tokens[:max_tokens] if max_tokens else all_tokens
+
+
+def load_or_cache_corpus(
+    filepath: str,
+    tokenizer,
+    cache_path: str = "data/corpus_tokens.pt",
+    text_field: str = "text",
+    max_tokens: int | None = None,
+) -> list[int]:
+    """Carrega tokens do cache se existir, senao encoda e salva.
+
+    Para re-encodar (ex: apos atualizar o JSONL), basta deletar o cache
+    ou rodar com --no-cache.
+    """
+    if not max_tokens and os.path.exists(cache_path):
+        # Verifica se o cache é mais recente que o corpus
+        corpus_mtime = os.path.getmtime(filepath)
+        cache_mtime = os.path.getmtime(cache_path)
+        if cache_mtime > corpus_mtime:
+            print(f"Loading cached tokens from {cache_path}")
+            tokens = torch.load(cache_path, weights_only=True).tolist()
+            print(f"Cached tokens: {len(tokens):,}")
+            return tokens
+        print("Corpus modified since last cache, re-encoding...")
+
+    tokens = load_jsonl_corpus(filepath, tokenizer, text_field, max_tokens)
+
+    if not max_tokens:
+        torch.save(torch.tensor(tokens, dtype=torch.int32), cache_path)
+        print(f"Tokens cached to {cache_path}")
+
+    return tokens
