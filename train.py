@@ -8,7 +8,7 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 
-from gepeto import GPT, BPETokenizer, TextDataset, load_jsonl_corpus
+from gepeto import GPT, BPETokenizer, TextDataset, load_or_cache_corpus
 
 # Presets de tamanho de modelo
 PRESETS = {
@@ -31,8 +31,19 @@ def get_device():
     return torch.device('cpu')
 
 
+def get_amp_dtype(device):
+    """Detecta o melhor dtype para AMP baseado no hardware.
+    BF16 em GPUs com suporte (Ampere+), FP16 nas demais.
+    """
+    if device.type != 'cuda':
+        return torch.float32
+    if torch.cuda.is_bf16_supported():
+        return torch.bfloat16
+    return torch.float16
+
+
 @torch.no_grad()
-def evaluate(model, dataloader, device):
+def evaluate(model, dataloader, device, amp_dtype):
     model.eval()
     total_loss = 0
     total_correct = 0
@@ -40,8 +51,9 @@ def evaluate(model, dataloader, device):
 
     for x, y in dataloader:
         x, y = x.to(device), y.to(device)
-        logits = model(x)
-        loss = nn.functional.cross_entropy(logits.view(-1, logits.size(-1)), y.view(-1))
+        with torch.amp.autocast(device.type, dtype=amp_dtype, enabled=(device.type == 'cuda')):
+            logits = model(x)
+            loss = nn.functional.cross_entropy(logits.view(-1, logits.size(-1)), y.view(-1))
         total_loss += loss.item() * x.size(0)
         preds = logits.argmax(dim=-1)
         total_correct += (preds == y).sum().item()
@@ -78,6 +90,10 @@ def main():
         "--resume", type=str, default=None,
         help="Caminho para checkpoint para retomar treino",
     )
+    parser.add_argument(
+        "--grad-checkpoint", action="store_true",
+        help="Ativa gradient checkpointing (troca tempo por VRAM)",
+    )
     args = parser.parse_args()
 
     device = get_device()
@@ -87,8 +103,8 @@ def main():
     tokenizer = BPETokenizer.load("data/bpe_tokenizer.json")
     print(f"Tokenizer: {tokenizer}")
 
-    print("Encoding corpus...")
-    encoded = load_jsonl_corpus(
+    print("Loading corpus...")
+    encoded = load_or_cache_corpus(
         "data/scraping/data/raw/wikipedia.jsonl", tokenizer, max_tokens=args.max_tokens
     )
     print(f"Total tokens: {len(encoded):,}")
@@ -114,7 +130,14 @@ def main():
     train_loader  = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
     val_loader    = DataLoader(val_dataset, batch_size=batch_size)
 
-    model = GPT(vocab_size, embed_dim, context_len, num_heads, num_layers).to(device)
+    amp_dtype = get_amp_dtype(device)
+    use_scaler = (amp_dtype == torch.float16)
+    print(f"AMP dtype: {amp_dtype} | GradScaler: {'on' if use_scaler else 'off'}")
+
+    model = GPT(vocab_size, embed_dim, context_len, num_heads, num_layers,
+                gradient_checkpointing=args.grad_checkpoint).to(device)
+    if args.grad_checkpoint:
+        print("Gradient checkpointing: on")
     print(f"Model parameters: {model.count_parameters():,}")
 
     # Weight decay seletivo: decay em pesos de Linear, sem decay em biases e LayerNorm
@@ -132,7 +155,7 @@ def main():
         {"params": decay_params, "weight_decay": 0.1},
         {"params": no_decay_params, "weight_decay": 0.0},
     ], lr=args.lr)
-    scaler = torch.amp.GradScaler('cuda', enabled=(device.type == 'cuda'))
+    scaler = torch.amp.GradScaler('cuda', enabled=use_scaler)
 
     # Cosine LR scheduler com linear warmup
     total_steps = len(train_loader) * args.epochs
@@ -190,7 +213,7 @@ def main():
         for step, (x, y) in enumerate(train_loader):
             x, y = x.to(device), y.to(device)
 
-            with torch.amp.autocast('cuda', enabled=(device.type == 'cuda')):
+            with torch.amp.autocast(device.type, dtype=amp_dtype, enabled=(device.type == 'cuda')):
                 logits = model(x)
                 loss = nn.functional.cross_entropy(logits.view(-1, logits.size(-1)), y.view(-1))
                 loss = loss / grad_accum_steps
@@ -210,7 +233,7 @@ def main():
 
         avg_train_loss = total_loss / len(train_loader)
         avg_grad_norm = epoch_grad_norm / max(1, optimizer_steps)
-        val_loss, val_acc = evaluate(model, val_loader, device)
+        val_loss, val_acc = evaluate(model, val_loader, device, amp_dtype)
         current_lr = optimizer.param_groups[0]['lr']
 
         log_writer.writerow([epoch + 1, f"{avg_train_loss:.6f}", f"{val_loss:.6f}", f"{val_acc:.6f}", f"{current_lr:.2e}", f"{avg_grad_norm:.4f}"])

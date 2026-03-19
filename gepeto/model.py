@@ -1,18 +1,20 @@
 import torch
 import torch.nn as nn
+from torch.utils.checkpoint import checkpoint
 from .layers import TransformerBlock
 
 
 class GPT(nn.Module):
-    def __init__(self, vocab_size, embed_dim, context_len, num_heads, num_layers, dropout=0.1):
+    def __init__(self, vocab_size, embed_dim, context_len, num_heads, num_layers, dropout=0.1, gradient_checkpointing=False):
         super().__init__()
         self.context_len = context_len
         self.num_layers = num_layers
+        self.gradient_checkpointing = gradient_checkpointing
 
         self.token_emb = nn.Embedding(vocab_size, embed_dim)
         self.pos_emb = nn.Embedding(context_len, embed_dim)
         self.drop = nn.Dropout(dropout)
-        self.blocks = nn.Sequential(*[
+        self.blocks = nn.ModuleList([
             TransformerBlock(embed_dim, num_heads, dropout) for _ in range(num_layers)
         ])
         self.ln_f = nn.LayerNorm(embed_dim)
@@ -41,7 +43,13 @@ class GPT(nn.Module):
         tok_emb = self.token_emb(idx)
         pos_emb = self.pos_emb(torch.arange(T, device=idx.device))
         x = self.drop(tok_emb + pos_emb)
-        x = self.blocks(x)
+
+        for block in self.blocks:
+            if self.gradient_checkpointing and self.training:
+                x = checkpoint(block, x, use_reentrant=False)
+            else:
+                x = block(x)
+
         x = self.ln_f(x)
         logits = self.head(x)
         return logits

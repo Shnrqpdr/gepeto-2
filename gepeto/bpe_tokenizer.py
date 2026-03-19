@@ -13,6 +13,12 @@ import re
 from collections import Counter
 from typing import Optional
 
+try:
+    from .cbpe import apply_merges as _c_apply_merges, apply_merges_batch as _c_apply_merges_batch
+    _HAS_C = True
+except Exception:
+    _HAS_C = False
+
 
 # Regex de pre-tokenizacao estilo GPT-2.
 # Separa em: contracoes, palavras (com espaco opcional antes),
@@ -123,6 +129,7 @@ class BPETokenizer:
 
         self.vocab_size = 256 + num_special + len(self.merges)
         self._build_vocab_table()
+        self._build_c_merge_arrays()
         self._is_fitted = True
         print(f"  Treinamento completo. vocab_size = {self.vocab_size}")
 
@@ -141,6 +148,13 @@ class BPETokenizer:
         for segment, is_special in segments:
             if is_special:
                 result.append(self.special_tokens[segment])
+            elif _HAS_C:
+                # Coleta todos os chunks do segmento e processa em batch via C
+                chunks = [list(w.encode("utf-8")) for w in GPT2_PAT.findall(segment)]
+                if chunks:
+                    merged = _c_apply_merges_batch(chunks, self._c_merges_a, self._c_merges_b, self._c_base_id)
+                    for m in merged:
+                        result.extend(m)
             else:
                 for word in GPT2_PAT.findall(segment):
                     tokens = list(word.encode("utf-8"))
@@ -184,12 +198,19 @@ class BPETokenizer:
         tok.special_tokens = data.get("special_tokens", {})
         tok.vocab_size = data["vocab_size"]
         tok._build_vocab_table()
+        tok._build_c_merge_arrays()
         tok._is_fitted = True
         return tok
 
     # ------------------------------------------------------------------ #
     # Helpers internos
     # ------------------------------------------------------------------ #
+
+    def _build_c_merge_arrays(self) -> None:
+        """Pre-computa arrays de merges para o backend C."""
+        self._c_merges_a = [a for a, b in self.merges]
+        self._c_merges_b = [b for a, b in self.merges]
+        self._c_base_id = 256 + len(self.special_tokens)
 
     def _build_vocab_table(self) -> None:
         """Constroi tabela token_id -> bytes para decode rapido."""
